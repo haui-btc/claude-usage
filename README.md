@@ -61,6 +61,36 @@ python cli.py dashboard
 ```
 
 
+### Docker
+
+Runs the dashboard in a container with access to your local Claude logs.
+
+**Using Docker Compose (recommended):**
+```
+git clone https://github.com/phuryn/claude-usage
+cd claude-usage
+docker compose up -d
+```
+
+Then open [http://localhost:8080](http://localhost:8080).
+
+The container mounts `~/.claude` read-write so the scanner can write `usage.db` alongside your existing logs. By default it rescans every 30 seconds (`SCAN_INTERVAL=30`). Set `SCAN_INTERVAL=0` to disable auto-scan.
+
+**Using plain Docker:**
+```
+docker build -t claude-usage .
+docker run -d \
+  -p 8080:8080 \
+  -v ~/.claude:/root/.claude \
+  -e SCAN_INTERVAL=30 \
+  claude-usage
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOST` | `0.0.0.0` | Bind address inside the container |
+| `PORT` | `8080` | Port inside the container |
+| `SCAN_INTERVAL` | `0` | Seconds between automatic rescans (0 = disabled) |
 ---
 
 ## Usage
