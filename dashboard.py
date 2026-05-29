@@ -1789,12 +1789,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def _background_scan(interval):
+    """Incremental scan loop — runs in a daemon thread."""
+    import threading
+    import scanner as _scanner
+
+    def loop():
+        while True:
+            try:
+                _scanner.scan(db_path=DB_PATH, projects_dirs=_scanner.DEFAULT_PROJECTS_DIRS, verbose=False)
+            except Exception as exc:
+                print(f"[auto-scan] error: {exc}")
+            threading.Event().wait(interval)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+
 def serve(host=None, port=None, surface=None):
     global SURFACE
     if surface:
         SURFACE = surface
     host = host or os.environ.get("HOST", "localhost")
     port = port or int(os.environ.get("PORT", "8080"))
+    scan_interval = int(os.environ.get("SCAN_INTERVAL", "0"))
+
+    import scanner as _scanner
+    # initial scan so data is available immediately
+    _scanner.scan(db_path=DB_PATH, projects_dirs=_scanner.DEFAULT_PROJECTS_DIRS, verbose=False)
+
+    if scan_interval > 0:
+        print(f"Auto-scan every {scan_interval}s (set SCAN_INTERVAL=0 to disable).")
+        _background_scan(scan_interval)
+
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")
