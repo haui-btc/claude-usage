@@ -5,10 +5,66 @@ dashboard.py - Local web dashboard served on localhost:8080.
 import json
 import os
 import sqlite3
+import subprocess
+import time
+import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+
+_USAGE_LIMITS_CACHE: dict = {}  # {"data": ..., "expires": float}
+_USAGE_LIMITS_TTL = 120  # seconds
+
+
+def _get_claude_token() -> str | None:
+    """Read the Claude Code OAuth token from env var or macOS Keychain."""
+    env = os.environ.get("CLAUDE_ACCESS_TOKEN") or os.environ.get("ANTHROPIC_ACCESS_TOKEN")
+    if env:
+        return env
+    try:
+        raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        creds = json.loads(raw.decode())
+        return creds.get("claudeAiOauth", {}).get("accessToken")
+    except subprocess.CalledProcessError:
+        return None
+    except Exception:
+        return None
+
+
+def get_usage_limits() -> dict:
+    """Fetch 5h / 7d usage limits from the Anthropic OAuth usage API, cached for 2 min."""
+    now = time.monotonic()
+    cached = _USAGE_LIMITS_CACHE.get("data")
+    if cached and _USAGE_LIMITS_CACHE.get("expires", 0) > now:
+        return cached
+
+    token = _get_claude_token()
+    if not token:
+        return {"error": "no_token"}
+
+    try:
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={"Authorization": f"Bearer {token}", "anthropic-beta": "claude-code-usage-v1"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        _USAGE_LIMITS_CACHE["data"] = data
+        _USAGE_LIMITS_CACHE["expires"] = now + _USAGE_LIMITS_TTL
+        return data
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429 and _USAGE_LIMITS_CACHE.get("data"):
+            # Rate-limited — serve stale cache rather than an error
+            _USAGE_LIMITS_CACHE["expires"] = now + 60
+            return _USAGE_LIMITS_CACHE["data"]
+        return {"error": f"HTTP {exc.code}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 from scanner import VERSION
 
@@ -229,6 +285,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card .value { font-size: 22px; font-weight: 700; }
   .stat-card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; }
 
+  .gauge-row { display: flex; gap: 16px; margin-bottom: 24px; align-items: stretch; }
+  .gauge-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px 24px; display: flex; align-items: center; gap: 20px; flex: 1; min-width: 0; }
+  .gauge-svg-wrap { flex-shrink: 0; }
+  .gauge-info { min-width: 0; }
+  .gauge-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+  .gauge-value { font-size: 22px; font-weight: 700; }
+  .gauge-sub { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .gauge-detail { color: var(--muted); font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   /* min-width:0 lets the grid column shrink below the canvas's intrinsic
      pixel width; without it, narrowing the window can't narrow the container,
@@ -329,6 +394,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
+  <div class="gauge-row" id="gauge-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1068,6 +1134,88 @@ function renderStats(t) {
   `).join('');
 }
 
+// ── Gauge charts ───────────────────────────────────────────────────────────
+function gaugeArc(pct) {
+  const r = 40, cx = 48, cy = 48, stroke = 9;
+  const circ = 2 * Math.PI * r;
+  const fill = Math.min(Math.max(pct, 0), 1) * circ;
+  return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="${stroke}"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="currentColor" stroke-width="${stroke}" ` +
+    `stroke-dasharray="${fill.toFixed(1)} ${circ.toFixed(1)}" stroke-linecap="round" ` +
+    `transform="rotate(-90 ${cx} ${cy})"/>`;
+}
+
+function gaugeColor(pct) {
+  if (pct < 0.6)  return '#4ade80';
+  if (pct < 0.85) return '#f59e0b';
+  return '#f87171';
+}
+
+function fmtTimeRemaining(resetsAt) {
+  if (!resetsAt) return '';
+  const diff = Math.max(0, new Date(resetsAt) - Date.now());
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function gaugeCard(title, pct, color, sub, detail) {
+  const pctDisp = Math.round(Math.min(pct * 100, 999));
+  return `<div class="gauge-card">
+    <div class="gauge-svg-wrap">
+      <svg width="96" height="96" viewBox="0 0 96 96" style="color:${color}">${gaugeArc(pct)}
+        <text x="48" y="48" text-anchor="middle" dominant-baseline="middle" fill="${color}" font-size="16" font-weight="700">${pctDisp}%</text>
+      </svg>
+    </div>
+    <div class="gauge-info">
+      <div class="gauge-title">${title}</div>
+      <div class="gauge-value" style="color:${color}">${pctDisp}<span style="font-size:14px;font-weight:400">%</span></div>
+      <div class="gauge-sub">${sub}</div>
+      ${detail ? `<div class="gauge-detail">${detail}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+async function renderGauges() {
+  let data;
+  try {
+    const resp = await fetch('/api/usage-limits');
+    data = await resp.json();
+  } catch(e) {
+    data = { error: 'fetch failed' };
+  }
+
+  if (data.error) {
+    const hint = data.error === 'no_token'
+      ? 'Restart the dashboard — macOS Keychain access needs to be approved in the terminal.'
+      : esc(data.error);
+    document.getElementById('gauge-row').innerHTML =
+      `<div class="gauge-card" style="color:var(--muted);font-size:12px">Usage limits unavailable — ${hint}</div>`;
+    return;
+  }
+
+  const fh = data.five_hour || {};
+  const sd = data.seven_day || {};
+
+  const fhPct   = (fh.utilization || 0) / 100;
+  const sdPct   = (sd.utilization || 0) / 100;
+  const fhColor = gaugeColor(fhPct);
+  const sdColor = gaugeColor(sdPct);
+  const fhTime  = fmtTimeRemaining(fh.resets_at);
+  const sdTime  = fmtTimeRemaining(sd.resets_at);
+
+  document.getElementById('gauge-row').innerHTML =
+    gaugeCard('5h Limit', fhPct, fhColor, 'rolling 5-hour window', fhTime ? `resets in ${fhTime}` : '') +
+    gaugeCard('7d Limit', sdPct, sdColor, 'rolling 7-day window', sdTime ? `resets in ${sdTime}` : '');
+}
+
+function renderGaugesPlaceholder() {
+  document.getElementById('gauge-row').innerHTML =
+    gaugeCard('5h Limit', 0, 'var(--muted)', 'loading…', '') +
+    gaugeCard('7d Limit', 0, 'var(--muted)', 'loading…', '');
+}
+
 // Bucket rows into 24 hours (display-TZ), summing turns + output, and count
 // the unique days in the input so the caller can compute per-day averages.
 function aggregateHourly(rows, tzMode) {
@@ -1576,6 +1724,7 @@ async function loadData() {
     rawData = d;
 
     if (isFirstLoad) {
+      renderGaugesPlaceholder();
       // Restore range from URL, mark active button
       selectedRange = readURLRange();
       document.querySelectorAll('.range-btn').forEach(btn =>
@@ -1594,6 +1743,7 @@ async function loadData() {
     }
 
     applyFilter();
+    renderGauges();
   } catch(e) {
     console.error(e);
   }
@@ -1686,6 +1836,7 @@ initFooterMeta();
 loadData();
 scheduleAutoRefresh();
 </script>
+
 </body>
 </html>
 """
@@ -1757,6 +1908,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif path == "/api/usage-limits":
+            data = get_usage_limits()
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -1821,6 +1981,16 @@ def serve(host=None, port=None, surface=None):
     if scan_interval > 0:
         print(f"Auto-scan every {scan_interval}s (set SCAN_INTERVAL=0 to disable).")
         _background_scan(scan_interval)
+
+    # Warm up keychain / API before the browser opens so the macOS dialog
+    # (if any) appears here in the terminal, not silently in a handler thread.
+    limits = get_usage_limits()
+    if limits.get("error"):
+        print(f"[usage-limits] unavailable: {limits['error']}")
+    else:
+        fh = limits.get("five_hour", {})
+        print(f"[usage-limits] 5h {fh.get('utilization', '?')}%  "
+              f"7d {limits.get('seven_day', {}).get('utilization', '?')}%")
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
