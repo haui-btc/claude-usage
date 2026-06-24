@@ -13,8 +13,9 @@ from urllib.parse import urlparse
 from pathlib import Path
 from datetime import datetime, timezone
 
-_USAGE_LIMITS_CACHE: dict = {}  # {"data": ..., "expires": float}
+_USAGE_LIMITS_CACHE: dict = {}  # {"data": ..., "expires": float, "backoff_until": float}
 _USAGE_LIMITS_TTL = 120  # seconds
+_USAGE_LIMITS_BACKOFF = 300  # seconds to wait after a 429 with no cached data
 
 
 def _get_claude_token() -> str | None:
@@ -42,6 +43,9 @@ def get_usage_limits() -> dict:
     cached = _USAGE_LIMITS_CACHE.get("data")
     if cached and _USAGE_LIMITS_CACHE.get("expires", 0) > now:
         return cached
+    # Still within backoff window from a previous 429 (no cached data)
+    if not cached and _USAGE_LIMITS_CACHE.get("backoff_until", 0) > now:
+        return {"error": "rate_limited"}
 
     token = _get_claude_token()
     if not token:
@@ -56,12 +60,16 @@ def get_usage_limits() -> dict:
             data = json.loads(resp.read())
         _USAGE_LIMITS_CACHE["data"] = data
         _USAGE_LIMITS_CACHE["expires"] = now + _USAGE_LIMITS_TTL
+        _USAGE_LIMITS_CACHE.pop("backoff_until", None)
         return data
     except urllib.error.HTTPError as exc:
-        if exc.code == 429 and _USAGE_LIMITS_CACHE.get("data"):
-            # Rate-limited — serve stale cache rather than an error
-            _USAGE_LIMITS_CACHE["expires"] = now + 60
-            return _USAGE_LIMITS_CACHE["data"]
+        if exc.code == 429:
+            if cached:
+                # Rate-limited but have stale data — serve it and retry in 1 min
+                _USAGE_LIMITS_CACHE["expires"] = now + 60
+                return cached
+            # No cached data — back off for 5 min to avoid hammering the API
+            _USAGE_LIMITS_CACHE["backoff_until"] = now + _USAGE_LIMITS_BACKOFF
         return {"error": f"HTTP {exc.code}"}
     except Exception as exc:
         return {"error": str(exc)}
@@ -1187,13 +1195,21 @@ async function renderGauges() {
   }
 
   if (data.error) {
+    const gaugeRow = document.getElementById('gauge-row');
+    if (data.error === 'rate_limited' || data.error === 'HTTP 429') {
+      // Hide silently — gauges reappear automatically once the rate limit lifts
+      gaugeRow.style.display = 'none';
+      return;
+    }
+    gaugeRow.style.display = '';
     const hint = data.error === 'no_token'
       ? 'Restart the dashboard — macOS Keychain access needs to be approved in the terminal.'
       : esc(data.error);
-    document.getElementById('gauge-row').innerHTML =
+    gaugeRow.innerHTML =
       `<div class="gauge-card" style="color:var(--muted);font-size:12px">Usage limits unavailable — ${hint}</div>`;
     return;
   }
+  document.getElementById('gauge-row').style.display = '';
 
   const fh = data.five_hour || {};
   const sd = data.seven_day || {};
