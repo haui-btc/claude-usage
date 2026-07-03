@@ -19,7 +19,9 @@ _USAGE_LIMITS_BACKOFF = 300  # seconds to wait after a 429 with no cached data
 
 
 def _get_claude_token() -> str | None:
-    """Read the Claude Code OAuth token from env var or macOS Keychain."""
+    """Read the Claude Code OAuth token from env var, macOS Keychain, or
+    ~/.claude/.credentials.json (Claude Code's storage on Linux — also the
+    path that works inside Docker when ~/.claude is volume-mounted)."""
     env = os.environ.get("CLAUDE_ACCESS_TOKEN") or os.environ.get("ANTHROPIC_ACCESS_TOKEN")
     if env:
         return env
@@ -30,9 +32,14 @@ def _get_claude_token() -> str | None:
             timeout=5,
         )
         creds = json.loads(raw.decode())
+        token = creds.get("claudeAiOauth", {}).get("accessToken")
+        if token:
+            return token
+    except Exception:
+        pass
+    try:
+        creds = json.loads((Path.home() / ".claude" / ".credentials.json").read_text())
         return creds.get("claudeAiOauth", {}).get("accessToken")
-    except subprocess.CalledProcessError:
-        return None
     except Exception:
         return None
 
@@ -45,7 +52,7 @@ def get_usage_limits() -> dict:
         return cached
     # Still within backoff window from a previous 429 (no cached data)
     if not cached and _USAGE_LIMITS_CACHE.get("backoff_until", 0) > now:
-        return {"error": "rate_limited"}
+        return {"error": _USAGE_LIMITS_CACHE.get("last_error", "rate_limited")}
 
     token = _get_claude_token()
     if not token:
@@ -68,8 +75,16 @@ def get_usage_limits() -> dict:
                 # Rate-limited but have stale data — serve it and retry in 1 min
                 _USAGE_LIMITS_CACHE["expires"] = now + 60
                 return cached
-            # No cached data — back off for 5 min to avoid hammering the API
+            # No cached data — back off for 5 min to avoid hammering the API.
+            # The API also answers 429 (not 401) to an *expired* OAuth token,
+            # so a 429 before any successful fetch usually means the token is
+            # stale (e.g. a frozen CLAUDE_ACCESS_TOKEN in Docker), not real
+            # rate pressure. Surface that instead of hiding the gauges forever.
             _USAGE_LIMITS_CACHE["backoff_until"] = now + _USAGE_LIMITS_BACKOFF
+            _USAGE_LIMITS_CACHE["last_error"] = "token_rejected"
+            return {"error": "token_rejected"}
+        if exc.code in (401, 403):
+            return {"error": "token_rejected"}
         return {"error": f"HTTP {exc.code}"}
     except Exception as exc:
         return {"error": str(exc)}
@@ -1461,6 +1476,8 @@ async function renderGauges() {
     gaugeRow.style.display = '';
     const hint = data.error === 'no_token'
       ? 'Restart the dashboard — macOS Keychain access needs to be approved in the terminal.'
+      : data.error === 'token_rejected'
+      ? 'The API rejected the OAuth token — it has likely expired. In Docker, refresh CLAUDE_ACCESS_TOKEN in .env and restart the container.'
       : esc(data.error);
     gaugeRow.innerHTML =
       `<div class="gauge-card" style="color:var(--muted);font-size:12px">Usage limits unavailable — ${hint}</div>`;
@@ -1478,9 +1495,22 @@ async function renderGauges() {
   const fhTime  = fmtTimeRemaining(fh.resets_at);
   const sdTime  = fmtTimeRemaining(sd.resets_at);
 
+  // Model-scoped weekly limits (e.g. the separate "Fable" weekly quota) come
+  // in the `limits` array as kind=weekly_scoped with scope.model set.
+  let scopedHtml = '';
+  for (const lim of (data.limits || [])) {
+    if (lim.kind !== 'weekly_scoped' || !lim.scope || !lim.scope.model) continue;
+    const name  = lim.scope.model.display_name || lim.scope.model.id || 'model';
+    const pct   = (lim.percent || 0) / 100;
+    const time  = fmtTimeRemaining(lim.resets_at);
+    scopedHtml += gaugeCard(`7d ${esc(name)}`, pct, gaugeColor(pct),
+      `rolling 7-day window · ${esc(name)} only`, time ? `resets in ${time}` : '');
+  }
+
   document.getElementById('gauge-row').innerHTML =
     gaugeCard('5h Limit', fhPct, fhColor, 'rolling 5-hour window', fhTime ? `resets in ${fhTime}` : '') +
-    gaugeCard('7d Limit', sdPct, sdColor, 'rolling 7-day window', sdTime ? `resets in ${sdTime}` : '');
+    gaugeCard('7d Limit', sdPct, sdColor, 'rolling 7-day window', sdTime ? `resets in ${sdTime}` : '') +
+    scopedHtml;
 }
 
 function renderGaugesPlaceholder() {
