@@ -9,4 +9,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["python", "-c", "from dashboard import serve; serve()"]
+CMD ["python3", "cli.py", "dashboard", "--no-browser"]

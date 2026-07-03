@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.5.4 — 2026-07-01
+
+### Dashboard
+
+- Added a **Title** column to the Recent Sessions table (after Project) and its CSV export, showing Claude Code's own session title: a user-set `custom-title` takes priority over an AI-generated `ai-title`. Long titles wrap within the column (min width 160px). Sessions without a title record show a muted **Untitled** placeholder — there is no fallback to the first user message, so prompt text never leaks into the table (#147, thanks @arojunior).
+- The Recent Sessions **CSV export now includes full session IDs** (the table still shows the 8-char prefix for readability, but an 8-char prefix isn't useful in an export) (#147).
+
+### VS Code extension
+
+- The embedded dashboard now waits up to **20s** (was 10s) for the server to become ready on cold start — the one-time topic backfill can slow the first launch — and a failed start now offers a **Retry** button (both in the error notification and on the panel) instead of only pointing at the command palette (#147).
+
+### Scanner
+
+- The scanner now parses `custom-title` / `ai-title` transcript records into a new `sessions.topic` column (additive in-place migration; existing DBs upgrade without a rebuild). Titles are captured even when Claude Code appends them after the turns (picked up on the next incremental scan), and a title-only record can never create a token-less phantom session row (#147, thanks @arojunior).
+- On upgrading an existing database, the next scan runs a **one-time topic backfill**: it re-reads the title records already present in previously-scanned transcripts (which an incremental scan would otherwise skip) so old sessions get a Topic too, then records via a `schema_meta` flag that it's done so it never repeats. Only title records are read, so token totals are untouched (#147).
+
+## v1.5.3 — 2026-07-01
+
+### Packaging
+
+- Added a `pyproject.toml` so the tool installs with `uv tool install git+https://github.com/phuryn/claude-usage` (or `pipx install …`) — no clone needed (#144, thanks @jamesbraza). Packaging only: `[project.dependencies]` is empty so the tool stays stdlib-only at runtime, the version is read dynamically from `scanner.VERSION` (still the single source of truth), and the clone + `python cli.py` path is unchanged. The `cli.py` `__main__` block was lifted into a `main()` function to serve as the `claude-usage` console entry point.
+
+## v1.5.2 — 2026-07-01
+
+### Packaging
+
+- Bumped the Homebrew formula pin from v1.1.0's commit to the **v1.5.1** tag tarball, so `brew install` / `brew upgrade` now installs current sources instead of year-old ones. The in-tree formula must reference the *previous* release to keep its `sha256` computable (a self-pointing hash is uncomputable), so Homebrew tracks one release behind by design (#46).
+
+## v1.5.1 — 2026-07-01
+
+### Packaging
+
+- Fixed the Homebrew shim crashing at runtime with `python@3.13/bin/python3: No such file or directory`. Modern `python@3.x` kegs only ship the versioned `python3.13` in their `bin` (the unversioned `python3` symlink moved to `libexec/bin`), so the formula now execs `python3.13` directly (#46, thanks @adrianlungu and @Jeroendevr for reporting).
+- Fixed the Homebrew install instructions: Homebrew disabled installing a formula from an arbitrary raw URL, so the README now taps the repo first (`brew tap phuryn/claude-usage …` then `brew install phuryn/claude-usage/claude-usage`) (#46, thanks @adrianlungu).
+
+## v1.5.0 — 2026-06-21
+
+### Dashboard
+
+- Added a sticky **section nav** under the filters that teleports to any section and highlights where you currently are — much faster to navigate the long single-page report. It's three compact entries: **Overview**, plus **Graphs** and **Tables** menus that drop down their sections on hover (or keyboard focus).
+- Made every chart and table card **collapsible**: click its title to fold the whole section away (independent of the in-table Show more/less paging). Collapsed sections are remembered across reloads, so you can permanently hide the views you don't use.
+- Reworked table paging so small tables aren't paged pointlessly: a table with **12 rows or fewer now shows in full** (no "Show more" to reveal just a row or two). Larger tables start at 10 rows and page **10 → 25 → 50**, with **Show less** collapsing back to 10.
+- Replaced the date-range button row with a compact **dropdown** — the eight buttons wrapped badly in the narrow VS Code panel.
+- Fixed the embedded VS Code panel **losing its saved state on reload** (collapsed sections, the update-check cache): the extension now reuses the dashboard's port across launches when it's free, so the iframe's localStorage origin stays stable instead of changing every time.
+- Added subagent attribution views: a **Subagent Tokens by Type** stacked bar chart and a **Top Subagent Dispatches** table, plus a Subagent Tokens stat card. Dispatched Task/Agent subagents (and Claude Code's auto-compaction) are surfaced separately while remaining included in the overall totals; both respect the existing model + range filters. All dynamic values are escaped via `esc()` (#140, thanks @john988).
+- The **Top Subagent Dispatches** table now behaves like Recent Sessions: it pages with Show more / Show less and exports all filtered rows to CSV, and it was moved below the Cost by Model table. The full ranked set is now sent to the client (previously capped at 50 server-side). Its header explanation ("ranked by total tokens; unknown = …") was moved into a small **(i) tooltip** to declutter the title.
+- Fixed **Cost by Project & Branch** default ordering: it now sorts by cost (descending) like the other cost tables, instead of grouping alphabetically by project name. Project name is kept only as a tiebreaker, and column sorting now matches the sibling tables.
+- Fixed a crash on `/api/data` (`no such table: agents`) that could appear on the first dashboard load right after upgrading — the server serves before its background scan migrates the DB, so `get_dashboard_data` now migrates the schema on read (idempotent) before running the subagent queries.
+
+### Scanner / CLI
+
+- The scanner now attributes subagent usage: new `turns.is_subagent` / `turns.agent_id` columns and an `agents` dispatch table (additive, in-place migrations — existing DBs upgrade without a rebuild). Subagents are detected via `isSidechain` / `agentId` / a `subagents/` transcript path, and dispatch metadata (agent type, status, duration, tool-use count) is captured from the parent tool result (#140, thanks @john988).
+- `today` and `stats` now print subagent token + turn summaries (counted as a subset of the totals, not added on top) (#140, thanks @john988).
+
+### Packaging / docs
+
+- Added Docker support: a `Dockerfile` and `scripts/run-docker.sh` run the dashboard in a container with `~/.claude` mounted **read-only** and the SQLite DB in a named volume, isolated from your home directory. A new `CLAUDE_USAGE_DB` env var makes the DB path configurable at runtime (default unchanged: `~/.claude/usage.db`) (#143, thanks @RafikFarhad).
+
 ## v1.4.0 — 2026-06-15
 
 ### Dashboard

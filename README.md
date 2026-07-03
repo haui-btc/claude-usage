@@ -2,12 +2,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![claude-code](https://img.shields.io/badge/claude--code-black?style=flat-square)](https://claude.ai/code)
+[![Companion: burnstop](https://img.shields.io/badge/companion-burnstop-blue?style=flat-square)](https://github.com/phuryn/burnstop)
 
 **Pro and Max subscribers get a progress bar. This gives you the full picture.**
 
 Claude Code writes detailed usage logs locally — token counts, models, sessions, projects — regardless of your plan. This dashboard reads those logs and turns them into charts and cost estimates. Works on API, Pro, and Max plans.
 
 ![Claude Usage Dashboard](docs/screenshot.png)
+
+Available as a **web app** (`python cli.py dashboard`) and as a [**VS Code extension**](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.claude-usage-phuryn).
 
 **Created by:** [The Product Compass Newsletter](https://www.productcompass.pm)
 
@@ -40,11 +43,22 @@ No `pip install`, no virtual environment, no build step.
 
 ### macOS / Linux (Homebrew)
 ```
-brew install --formula https://raw.githubusercontent.com/phuryn/claude-usage/main/Formula/claude-usage.rb
+brew tap phuryn/claude-usage https://github.com/phuryn/claude-usage
+brew install phuryn/claude-usage/claude-usage
 claude-usage dashboard
 ```
 
+> Homebrew has disabled installing a formula from an arbitrary raw URL, so tap the repo first (thanks @adrianlungu for the working incantation in #46).
+
 After install, the `claude-usage` command is on your `PATH` and accepts the same subcommands as `python cli.py` (`scan`, `today`, `stats`, `dashboard`).
+
+### Any OS (uv tool / pipx)
+```
+uv tool install git+https://github.com/phuryn/claude-usage
+claude-usage dashboard
+```
+
+Installs the `claude-usage` command without a clone (works with [`pipx`](https://pipx.pypa.io/) too: `pipx install git+https://github.com/phuryn/claude-usage`). The tool stays dependency-free — this only adds packaging metadata, no third-party runtime deps (#144).
 
 ### macOS / Linux (clone)
 ```
@@ -60,21 +74,27 @@ cd claude-usage
 python cli.py dashboard
 ```
 
-
 ### Docker
+```
+git clone https://github.com/phuryn/claude-usage
+cd claude-usage
+bash scripts/run-docker.sh
+```
 
-Runs the dashboard in a container with access to your local Claude logs.
+Opens the dashboard at **http://localhost:9898**.
 
-**Using Docker Compose (recommended):**
+The script builds the image, then runs the container with:
+- `~/.claude` mounted **read-only** — the container can read your transcripts but cannot modify them
+- A named Docker volume (`claude-usage-data`) for the SQLite database — persisted across restarts, isolated from your home directory
+
+**Using Docker Compose:**
 ```
 git clone https://github.com/phuryn/claude-usage
 cd claude-usage
 docker compose up -d
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
-
-The container mounts `~/.claude` read-write so the scanner can write `usage.db` alongside your existing logs. By default it rescans every 30 seconds (`SCAN_INTERVAL=30`). Set `SCAN_INTERVAL=0` to disable auto-scan.
+Then open [http://localhost:8080](http://localhost:8080). This variant mounts `~/.claude` read-write so the scanner can write `usage.db` alongside your existing logs, and rescans every 30 seconds by default (`SCAN_INTERVAL=30`, set to `0` to disable).
 
 **Using plain Docker:**
 ```
@@ -91,6 +111,7 @@ docker run -d \
 | `HOST` | `0.0.0.0` | Bind address inside the container |
 | `PORT` | `8080` | Port inside the container |
 | `SCAN_INTERVAL` | `0` | Seconds between automatic rescans (0 = disabled) |
+| `CLAUDE_USAGE_DB` | `~/.claude/usage.db` | Path to the SQLite database file |
 ---
 
 ## Usage
@@ -137,7 +158,7 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 `scanner.py` parses those files and stores the data in a SQLite database at `~/.claude/usage.db`.
 
-`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering with bookmarkable URLs. The bind address and port can be overridden with `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
+`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering and a date-range dropdown with bookmarkable URLs. A sticky section nav jumps between sections, and every chart/table can be collapsed (remembered across reloads). The bind address and port can be overridden with `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
 
 ---
 
@@ -167,6 +188,8 @@ If you'd rather see the dashboard inside your editor, the same UI is available a
 
 [**Install from the VS Code Marketplace →**](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.claude-usage-phuryn)
 
+[**See in Open VSX Registry →**](https://open-vsx.org/extension/PawelHuryn/claude-usage-phuryn)
+
 ![VS Code extension — daily usage](docs/usage1.png)
 ![VS Code extension — hourly + projects](docs/usage2.png)
 
@@ -183,5 +206,7 @@ See [vscode-extension/README.md](vscode-extension/README.md) for settings, comma
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
 | `cli.py` | `scan`, `today`, `stats`, `dashboard` commands |
-| `Formula/claude-usage.rb` | Homebrew formula — install with `brew install --formula <raw-url>` |
+| `Formula/claude-usage.rb` | Homebrew formula — install with `brew tap phuryn/claude-usage` then `brew install phuryn/claude-usage/claude-usage` |
 | `vscode-extension/` | VS Code extension — embeds the dashboard inside VS Code |
+| `Dockerfile` | Container image definition |
+| `scripts/run-docker.sh` | Build and run the dashboard in Docker with a read-only `~/.claude` mount |

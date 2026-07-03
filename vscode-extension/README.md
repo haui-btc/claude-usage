@@ -12,11 +12,27 @@ Works on **API, Pro, and Max plans**. Captures usage from the Claude Code CLI, t
 
 ---
 
+## What it shows
+
+- **Daily token usage** and **average hourly distribution** charts (with peak-hour shading)
+- **Cost by model, project, and project + branch** tables, plus **Recent Sessions** — sortable, paged, and CSV-exportable
+- **Subagent attribution** — a Subagent Tokens by Type chart and a Top Subagent Dispatches table that break dispatched Task/Agent usage out from your main sessions
+- **Model multi-select** and a **date-range** dropdown to scope everything at once
+- A sticky **section nav** for jumping between sections, and **collapsible** chart/table cards that remember what you've folded away across reloads
+
+Cost estimates use Anthropic's published API pricing (actual Max/Pro costs differ).
+
+---
+
 ## Install
 
 ### From the VS Code Marketplace
 
-Search the Extensions sidebar for **"Claude Code Usage"** (publisher: `PawelHuryn`), or open the marketplace link from the Open VSX page.
+Search the Extensions sidebar for **"Claude Code Usage"** (publisher: `PawelHuryn`), or open it directly:
+
+[**Install from the VS Code Marketplace →**](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.claude-usage-phuryn)
+
+[**See in Open VSX Registry →**](https://open-vsx.org/extension/PawelHuryn/claude-usage-phuryn)
 
 ### From a prebuilt `.vsix` (no build step)
 
