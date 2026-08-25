@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.0 — TBD
+## v1.6.0 — 2026-08-25
 
 ### Dashboard
 
