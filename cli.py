@@ -426,7 +426,7 @@ def cmd_dashboard(projects_dir=None, host=None, port=None, no_browser=False, sur
 
         threading.Thread(target=open_browser, daemon=True).start()
 
-    serve(host=host, port=port, surface=surface)
+    serve(host=host, port=port, surface=surface, initial_scan=False)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

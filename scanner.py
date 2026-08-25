@@ -6,6 +6,7 @@ import json
 import os
 import glob
 import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -573,7 +574,21 @@ def insert_turns(conn, turns):
     ])
 
 
+# Serializes scans within a process. cli.cmd_dashboard's startup scan, the
+# dashboard's SCAN_INTERVAL auto-scan loop and POST /api/rescan can all fire at
+# once; upsert_sessions does a non-atomic SELECT-then-INSERT, so two concurrent
+# scanners both see "no such session" and the second INSERT raises
+# "UNIQUE constraint failed: sessions.session_id", killing the thread.
+_SCAN_LOCK = threading.Lock()
+
+
 def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
+    with _SCAN_LOCK:
+        return _scan_locked(projects_dir=projects_dir, projects_dirs=projects_dirs,
+                            db_path=db_path, verbose=verbose)
+
+
+def _scan_locked(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
     conn = get_db(db_path)
     init_db(conn)
 

@@ -2500,7 +2500,7 @@ def _background_scan(interval):
     t.start()
 
 
-def serve(host=None, port=None, surface=None):
+def serve(host=None, port=None, surface=None, initial_scan=True):
     global SURFACE
     if surface:
         SURFACE = surface
@@ -2509,8 +2509,13 @@ def serve(host=None, port=None, surface=None):
     scan_interval = int(os.environ.get("SCAN_INTERVAL", "0"))
 
     import scanner as _scanner
-    # initial scan so data is available immediately
-    _scanner.scan(db_path=DB_PATH, projects_dirs=_scanner.DEFAULT_PROJECTS_DIRS, verbose=False)
+    # Initial scan so data is available immediately when dashboard.py is run
+    # directly. cli.cmd_dashboard already scans in a background thread (so the
+    # port binds before a cold scan finishes) and passes initial_scan=False --
+    # without that this blocks startup and runs a second scan concurrently with
+    # that thread.
+    if initial_scan:
+        _scanner.scan(db_path=DB_PATH, projects_dirs=_scanner.DEFAULT_PROJECTS_DIRS, verbose=False)
 
     if scan_interval > 0:
         print(f"Auto-scan every {scan_interval}s (set SCAN_INTERVAL=0 to disable).")
