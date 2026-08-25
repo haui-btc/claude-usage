@@ -102,6 +102,49 @@ DB_PATH = Path(os.environ.get("CLAUDE_USAGE_DB", Path.home() / ".claude" / "usag
 # would misfire there because the Marketplace publish lags the GitHub release).
 SURFACE = "web"
 
+# ── Work / private account split ──────────────────────────────────────────────
+# Claude Code picks its account from the *working directory* (a company setup
+# typically symlinks .claude/settings.local.json to a Vertex/Bedrock config in
+# each work project). The transcripts record that directory in turns.cwd, so the
+# same rule that routes the request also classifies its tokens after the fact.
+#
+# WORK_DIRS holds os.pathsep-separated path prefixes ("/Users/me/Documents/mgb").
+# Unset -> the split is disabled and the dashboard behaves exactly as before.
+def _parse_work_dirs(raw):
+    dirs = []
+    for part in (raw or "").split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        # Store without a trailing slash; matching adds the separator itself.
+        dirs.append(os.path.expanduser(part).rstrip("/"))
+    return dirs
+
+
+WORK_DIRS = _parse_work_dirs(os.environ.get("WORK_DIRS"))
+
+
+def _work_predicate(col="cwd"):
+    """(sql, params) -> truthy when `col` is inside one of WORK_DIRS.
+
+    Prefix-matched on a path boundary via substr() rather than LIKE: paths
+    legitimately contain LIKE wildcards (`_BACKUP` would match any character),
+    which would silently misclassify neighbouring directories.
+    """
+    if not WORK_DIRS:
+        return "0", []
+    clauses, params = [], []
+    for d in WORK_DIRS:
+        clauses.append(f"({col} = ? OR substr({col}, 1, ?) = ?)")
+        params += [d, len(d) + 1, d + "/"]
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def _account_expr(col="cwd"):
+    """(sql, params) -> 'work' / 'private' label for a turn's cwd."""
+    pred, params = _work_predicate(col)
+    return f"CASE WHEN {pred} THEN 'work' ELSE 'private' END", params
+
 
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
@@ -134,23 +177,26 @@ def get_dashboard_data(db_path=DB_PATH):
     all_models = [r["model"] for r in model_rows]
 
     # ── Daily per-model, ALL history (client filters by range) ────────────────
-    daily_rows = conn.execute("""
+    acct_expr, acct_params = _account_expr("cwd")
+    daily_rows = conn.execute(f"""
         SELECT
             substr(timestamp, 1, 10)   as day,
             COALESCE(NULLIF(model, ''), 'unknown') as model,
+            {acct_expr}                as account,
             SUM(input_tokens)          as input,
             SUM(output_tokens)         as output,
             SUM(cache_read_tokens)     as cache_read,
             SUM(cache_creation_tokens) as cache_creation,
             COUNT(*)                   as turns
         FROM turns
-        GROUP BY day, COALESCE(NULLIF(model, ''), 'unknown')
+        GROUP BY day, COALESCE(NULLIF(model, ''), 'unknown'), account
         ORDER BY day, model
-    """).fetchall()
+    """, acct_params).fetchall()
 
     daily_by_model = [{
         "day":            r["day"],
         "model":          r["model"],
+        "account":        r["account"],
         "input":          r["input"] or 0,
         "output":         r["output"] or 0,
         "cache_read":     r["cache_read"] or 0,
@@ -160,23 +206,25 @@ def get_dashboard_data(db_path=DB_PATH):
 
     # ── Hourly per-day per-model (client filters by range + TZ-shifts) ────────
     # Timestamps are ISO8601 UTC (e.g. "2026-04-08T09:30:00Z"); chars 12-13 = hour.
-    hourly_rows = conn.execute("""
+    hourly_rows = conn.execute(f"""
         SELECT
             substr(timestamp, 1, 10)                  as day,
             CAST(substr(timestamp, 12, 2) AS INTEGER) as hour,
             COALESCE(NULLIF(model, ''), 'unknown')    as model,
+            {acct_expr}                               as account,
             SUM(output_tokens)                        as output,
             COUNT(*)                                  as turns
         FROM turns
         WHERE timestamp IS NOT NULL AND length(timestamp) >= 13
-        GROUP BY day, hour, COALESCE(NULLIF(model, ''), 'unknown')
+        GROUP BY day, hour, COALESCE(NULLIF(model, ''), 'unknown'), account
         ORDER BY day, hour, model
-    """).fetchall()
+    """, acct_params).fetchall()
 
     hourly_by_model = [{
         "day":    r["day"],
         "hour":   r["hour"] if r["hour"] is not None else 0,
         "model":  r["model"],
+        "account": r["account"],
         "output": r["output"] or 0,
         "turns":  r["turns"] or 0,
     } for r in hourly_rows]
@@ -192,6 +240,17 @@ def get_dashboard_data(db_path=DB_PATH):
         ORDER BY last_timestamp DESC
     """).fetchall()
 
+    # A session is "work" if any of its turns ran inside a work dir. Sessions
+    # don't store cwd (only turns do), so map it up from the turns table.
+    work_pred, work_params = _work_predicate("cwd")
+    session_account = {}
+    if WORK_DIRS:
+        for r in conn.execute(f"""
+            SELECT session_id, MAX(CASE WHEN {work_pred} THEN 1 ELSE 0 END) as is_work
+            FROM turns GROUP BY session_id
+        """, work_params):
+            session_account[r["session_id"]] = "work" if r["is_work"] else "private"
+
     sessions_all = []
     for r in session_rows:
         try:
@@ -204,6 +263,7 @@ def get_dashboard_data(db_path=DB_PATH):
             # Full id: the table truncates for display, but the CSV export
             # needs the whole thing (an 8-char prefix isn't uniquely useful).
             "session_id":    r["session_id"],
+            "account":       session_account.get(r["session_id"], "private"),
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
             "topic":         r["topic"] or "",
@@ -228,11 +288,13 @@ def get_dashboard_data(db_path=DB_PATH):
         "ELSE 'unknown' END)"
     )
 
+    t_acct_expr, t_acct_params = _account_expr("t.cwd")
     subagent_daily_rows = conn.execute(f"""
         SELECT
             substr(t.timestamp, 1, 10)               as day,
             {AGENT_TYPE_EXPR}                        as agent_type,
             COALESCE(NULLIF(t.model, ''), 'unknown') as model,
+            {t_acct_expr}                            as account,
             SUM(t.input_tokens)                      as input,
             SUM(t.output_tokens)                     as output,
             SUM(t.cache_read_tokens)                 as cache_read,
@@ -242,14 +304,15 @@ def get_dashboard_data(db_path=DB_PATH):
         FROM turns t
         LEFT JOIN agents a ON t.agent_id = a.agent_id
         WHERE t.is_subagent = 1
-        GROUP BY day, agent_type, model
+        GROUP BY day, agent_type, model, account
         ORDER BY day, agent_type
-    """).fetchall()
+    """, t_acct_params).fetchall()
 
     subagent_by_type = [{
         "day":            r["day"],
         "agent_type":     r["agent_type"],
         "model":          r["model"],
+        "account":        r["account"],
         "input":          r["input"] or 0,
         "output":         r["output"] or 0,
         "cache_read":     r["cache_read"] or 0,
@@ -259,11 +322,14 @@ def get_dashboard_data(db_path=DB_PATH):
     } for r in subagent_daily_rows]
 
     # ── Top individual subagent dispatches (one row per agent_id) ─────────────
+    t_work_pred, t_work_params = _work_predicate("t.cwd")
     top_dispatch_rows = conn.execute(f"""
         SELECT
             t.agent_id                               as agent_id,
             {AGENT_TYPE_EXPR}                        as agent_type,
             COALESCE(NULLIF(t.model, ''), 'unknown') as model,
+            CASE WHEN MAX(CASE WHEN {t_work_pred} THEN 1 ELSE 0 END) = 1
+                 THEN 'work' ELSE 'private' END      as account,
             MIN(t.timestamp)                         as start_ts,
             SUM(t.input_tokens)                      as input,
             SUM(t.output_tokens)                     as output,
@@ -280,12 +346,13 @@ def get_dashboard_data(db_path=DB_PATH):
         GROUP BY t.agent_id
         ORDER BY (SUM(t.input_tokens) + SUM(t.output_tokens)
                   + SUM(t.cache_read_tokens) + SUM(t.cache_creation_tokens)) DESC
-    """).fetchall()
+    """, t_work_params).fetchall()
 
     top_dispatches = [{
         "agent_id":       r["agent_id"],
         "agent_type":     r["agent_type"],
         "model":          r["model"],
+        "account":        r["account"],
         "start":          (r["start_ts"] or "")[:16].replace("T", " "),
         "start_date":     (r["start_ts"] or "")[:10],
         "input":          r["input"] or 0,
@@ -307,6 +374,8 @@ def get_dashboard_data(db_path=DB_PATH):
         "sessions_all":    sessions_all,
         "subagent_by_type": subagent_by_type,
         "top_dispatches":  top_dispatches,
+        # Empty -> the client hides the Firma/Privat filter entirely.
+        "work_dirs":       WORK_DIRS,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -548,6 +617,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="model-checkboxes"></div>
     </div>
   </div>
+  <div class="filter-sep" id="account-sep" hidden></div>
+  <div class="filter-label" id="account-label" hidden>Konto</div>
+  <div class="range-select" id="account-select-wrap" hidden>
+    <select id="account-select" aria-label="Konto (Firma / Privat)" onchange="setAccount(this.value)">
+      <option value="all">Alle</option>
+      <option value="work">Firma</option>
+      <option value="private">Privat</option>
+    </select>
+  </div>
   <div class="filter-sep"></div>
   <div class="filter-label">Range</div>
   <div class="range-select">
@@ -735,6 +813,9 @@ let rawData = null;
 let selectedModels = new Set();
 let allModelsList = [];
 let selectedRange = '30d';
+// 'all' | 'work' | 'private' -- Firma/Privat split, driven by the WORK_DIRS env
+// var. Stays 'all' (and the control stays hidden) when WORK_DIRS is unset.
+let selectedAccount = 'all';
 let charts = {};
 let sessionSortCol = 'last';
 let modelSortCol = 'cost';
@@ -1027,6 +1108,37 @@ function setRange(range) {
   scheduleAutoRefresh();
 }
 
+function initAccountFilter(workDirs) {
+  const wrap  = document.getElementById('account-select-wrap');
+  const label = document.getElementById('account-label');
+  const sep   = document.getElementById('account-sep');
+  if (!wrap) return;
+  const enabled = workDirs.length > 0;
+  [wrap, label, sep].forEach(el => { if (el) el.hidden = !enabled; });
+  if (!enabled) { selectedAccount = 'all'; return; }
+
+  const p = new URLSearchParams(window.location.search).get('account');
+  selectedAccount = ['all', 'work', 'private'].includes(p) ? p : 'all';
+  const sel = document.getElementById('account-select');
+  if (sel) {
+    sel.value = selectedAccount;
+    sel.title = 'Firma = Arbeitsverzeichnis unter:\n' + workDirs.join('\n');
+  }
+}
+
+function setAccount(account) {
+  selectedAccount = account;
+  const sel = document.getElementById('account-select');
+  if (sel) sel.value = account;
+  updateURL();
+  applyFilter();
+}
+
+// Rows carry account='work'|'private'; 'all' matches everything.
+function matchesAccount(r) {
+  return selectedAccount === 'all' || r.account === selectedAccount;
+}
+
 function setHourlyTZ(mode) {
   hourlyTZ = mode;
   document.querySelectorAll('.tz-btn').forEach(btn =>
@@ -1206,6 +1318,7 @@ function updateURL() {
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
   if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
+  if (selectedAccount !== 'all') params.set('account', selectedAccount);
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
 }
@@ -1255,7 +1368,7 @@ function applyFilter() {
 
   // Filter daily rows by model + date range
   const filteredDaily = rawData.daily_by_model.filter(r =>
-    selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
+    selectedModels.has(r.model) && matchesAccount(r) && (!start || r.day >= start) && (!end || r.day <= end)
   );
 
   // Daily chart: aggregate by day
@@ -1284,7 +1397,7 @@ function applyFilter() {
 
   // Filter sessions by model + date range
   const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
+    selectedModels.has(s.model) && matchesAccount(s) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
   );
 
   // Add session counts into modelMap
@@ -1335,13 +1448,13 @@ function applyFilter() {
     cache_creation: byModel.reduce((s, m) => s + m.cache_creation, 0),
     cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation), 0),
     subagent_tokens: (rawData.subagent_by_type || [])
-      .filter(r => selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end))
+      .filter(r => selectedModels.has(r.model) && matchesAccount(r) && (!start || r.day >= start) && (!end || r.day <= end))
       .reduce((s, r) => s + r.input + r.output + r.cache_read + r.cache_creation, 0),
   };
 
   // Hourly aggregation (filtered by model + range, then bucketed by UTC hour)
   const hourlySrc = (rawData.hourly_by_model || []).filter(r =>
-    selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
+    selectedModels.has(r.model) && matchesAccount(r) && (!start || r.day >= start) && (!end || r.day <= end)
   );
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
@@ -1349,6 +1462,7 @@ function applyFilter() {
   const subagentTypeMap = {};
   for (const r of (rawData.subagent_by_type || [])) {
     if (!selectedModels.has(r.model)) continue;
+    if (!matchesAccount(r)) continue;
     if (start && r.day < start) continue;
     if (end && r.day > end) continue;
     const k = r.agent_type;
@@ -1366,7 +1480,7 @@ function applyFilter() {
   // (already ranked by tokens server-side) so the table can page it like Recent
   // Sessions — show more/less plus CSV export of everything.
   const filteredDispatches = (rawData.top_dispatches || []).filter(d =>
-    selectedModels.has(d.model) && (!start || d.start_date >= start) && (!end || d.start_date <= end)
+    selectedModels.has(d.model) && matchesAccount(d) && (!start || d.start_date >= start) && (!end || d.start_date <= end)
   );
 
   // Update daily chart title
@@ -2125,6 +2239,9 @@ async function loadData() {
       document.querySelectorAll('.tz-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.tz === hourlyTZ)
       );
+      // Firma/Privat control: only meaningful when the server knows which
+      // directories belong to work, so keep it hidden unless WORK_DIRS is set.
+      initAccountFilter(d.work_dirs || []);
       // Build model filter (reads URL for model selection too)
       buildFilterUI(d.all_models);
       updateSortIcons();

@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.6.0 — TBD
+
+### Dashboard
+
+- Added a **work / private account split**. Claude Code picks its account from the working directory (a company setup typically symlinks `.claude/settings.local.json` to a Vertex/Bedrock config per project), and the transcripts record that directory in `turns.cwd` — so the same rule that routes a request now also classifies its tokens. Set `WORK_DIRS` to one or more path prefixes (`os.pathsep`-separated) and a **Konto** filter appears in the filter bar (`Alle` / `Firma` / `Privat`), applying to every chart, table and total. Unset, the control stays hidden and the dashboard behaves exactly as before.
+- Prefix matching uses `substr()` rather than `LIKE`, since paths legitimately contain LIKE wildcards — a `_BACKUP` directory would otherwise match any single character, and a sibling `…/mgb-privat` would be swallowed by the `…/mgb` prefix.
+
+### Scanner
+
+- Fixed `sqlite3.IntegrityError: UNIQUE constraint failed: sessions.session_id` killing the dashboard on startup. `cli.cmd_dashboard` starts a background scan thread and then calls `serve()`, which ran its *own* blocking scan — two scanners raced on the non-atomic SELECT-then-INSERT in `upsert_sessions`, both saw "session missing", and the second INSERT took down both threads. `scan()` now serialises on a module-level lock, which also covers the `SCAN_INTERVAL` auto-scan loop and `POST /api/rescan` overlapping.
+- `serve()` takes `initial_scan=True`; `cli.cmd_dashboard` passes `False` to drop the duplicate scan. This also restores what its own comment intends: the port now binds in ~1s instead of after a full cold scan (the VS Code extension kills the process if `/api/data` doesn't answer in time).
+
+### Packaging
+
+- The Docker image sets `PYTHONUNBUFFERED=1` so scan progress streams to `docker compose logs` instead of sitting in Python's block buffer — a long scan previously looked hung.
+- `docker-compose.yml` passes `WORK_DIRS` through (empty by default; set it in `.env`).
+
 ## v1.5.4 — 2026-07-01
 
 ### Dashboard
