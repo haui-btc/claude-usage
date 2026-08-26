@@ -2,6 +2,12 @@
 dashboard.py - Local web dashboard served on localhost:8080.
 """
 
+# Annotations are evaluated lazily, so PEP 604 unions ("str | None") are safe
+# on the Python 3.9 leg of CI. Without this, such an annotation raises
+# TypeError at import time on 3.9 and every test module importing dashboard
+# fails to load. See .github/workflows/tests.yml for the supported versions.
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
