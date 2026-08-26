@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.6.0 — 2026-08-25
+
+### Dashboard
+
+- Added a **work / private account split**. Claude Code picks its account from the working directory (a company setup typically symlinks `.claude/settings.local.json` to a Vertex/Bedrock config per project), and the transcripts record that directory in `turns.cwd` — so the same rule that routes a request now also classifies its tokens. Set `WORK_DIRS` to one or more path prefixes (`os.pathsep`-separated) and a **Konto** filter appears in the filter bar (`Alle` / `Firma` / `Privat`), applying to every chart, table and total. Unset, the control stays hidden and the dashboard behaves exactly as before.
+- Prefix matching uses `substr()` rather than `LIKE`, since paths legitimately contain LIKE wildcards — a `_BACKUP` directory would otherwise match any single character, and a sibling `…/mgb-privat` would be swallowed by the `…/mgb` prefix.
+
+### Scanner
+
+- Fixed `sqlite3.IntegrityError: UNIQUE constraint failed: sessions.session_id` killing the dashboard on startup. `cli.cmd_dashboard` starts a background scan thread and then calls `serve()`, which ran its *own* blocking scan — two scanners raced on the non-atomic SELECT-then-INSERT in `upsert_sessions`, both saw "session missing", and the second INSERT took down both threads. `scan()` now serialises on a module-level lock, which also covers the `SCAN_INTERVAL` auto-scan loop and `POST /api/rescan` overlapping.
+- `serve()` takes `initial_scan=True`; `cli.cmd_dashboard` passes `False` to drop the duplicate scan. This also restores what its own comment intends: the port now binds in ~1s instead of after a full cold scan (the VS Code extension kills the process if `/api/data` doesn't answer in time).
+
+### Packaging
+
+- The Docker image sets `PYTHONUNBUFFERED=1` so scan progress streams to `docker compose logs` instead of sitting in Python's block buffer — a long scan previously looked hung.
+- `docker-compose.yml` passes `WORK_DIRS` through (empty by default; set it in `.env`).
+
+## v1.5.5 — 2026-07-10
+
+### Dashboard
+
+- Added an **Est. Cost line overlay** to the Daily Token Usage chart — a legend-toggleable line on a dedicated right-hand axis, priced **per model before the daily aggregation** so multi-model days are costed correctly (#151, thanks @paulabenzar).
+- Fixed **"This Month"** (and the other calendar ranges) including the previous month's last day in UTC+ timezones: date-range bounds are now formatted from local calendar components instead of `toISOString()` (UTC). The same local-date helper is now used by `rangeIncludesToday`, so it can no longer disagree with the range bounds near UTC midnight (#151, thanks @paulabenzar).
+
+### Scanner / CLI
+
+- The `today`, `week`, and `stats` commands now run the idempotent schema migration when they open the database, so reading before the next `scan` no longer crashes with `sqlite3.OperationalError: no such column: is_subagent` on a database created before subagent tracking existed. The dashboard already did this; the CLI read path now matches (#153, thanks @iliaal).
+
+### Project / docs
+
+- Documented the `dashboard` command's `--host` / `--port` flags in the README and AGENTS.md — the flags already worked (and are shown in the built-in `USAGE` text) but only the `HOST` / `PORT` environment variables were documented (#150, thanks @subhamchbty).
+
 ## v1.5.4 — 2026-07-01
 
 ### Dashboard

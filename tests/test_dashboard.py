@@ -494,5 +494,89 @@ class TestPricingParity(unittest.TestCase):
             )
 
 
+class TestWorkAccountSplit(unittest.TestCase):
+    """Firma/Privat classification driven by WORK_DIRS (turns.cwd prefixes)."""
+
+    WORK = "/Users/me/Documents/mgb"
+
+    def setUp(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmpfile.close()
+        self.db_path = Path(self.tmpfile.name)
+        conn = get_db(self.db_path)
+        init_db(conn)
+
+        def sess(sid):
+            return {
+                "session_id": sid, "project_name": "p", "git_branch": "main",
+                "first_timestamp": "2026-04-08T09:00:00Z",
+                "last_timestamp": "2026-04-08T10:00:00Z",
+                "model": "claude-sonnet-4-6", "total_input_tokens": 10,
+                "total_output_tokens": 10, "total_cache_read": 0,
+                "total_cache_creation": 0, "turn_count": 1,
+            }
+
+        def turn(sid, cwd):
+            return {
+                "session_id": sid, "timestamp": "2026-04-08T09:30:00Z",
+                "model": "claude-sonnet-4-6", "input_tokens": 10,
+                "output_tokens": 10, "cache_read_tokens": 0,
+                "cache_creation_tokens": 0, "tool_name": None, "cwd": cwd,
+            }
+
+        upsert_sessions(conn, [sess("s-work"), sess("s-priv"), sess("s-sibling")])
+        insert_turns(conn, [
+            turn("s-work", self.WORK + "/git/repo"),
+            turn("s-priv", "/Users/me/Documents/IT/private"),
+            # Sibling dir sharing the prefix but not on a path boundary --
+            # must NOT be classified as work.
+            turn("s-sibling", self.WORK + "-privat/thing"),
+        ])
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _data(self, work_dirs):
+        """get_dashboard_data with WORK_DIRS patched at module level."""
+        import dashboard
+        original = dashboard.WORK_DIRS
+        dashboard.WORK_DIRS = work_dirs
+        try:
+            return get_dashboard_data(db_path=self.db_path)
+        finally:
+            dashboard.WORK_DIRS = original
+
+    def test_disabled_by_default(self):
+        data = self._data([])
+        self.assertEqual(data["work_dirs"], [])
+        # Everything falls back to private when no work dirs are configured.
+        self.assertTrue(all(s["account"] == "private" for s in data["sessions_all"]))
+
+    def test_classifies_work_and_private(self):
+        data = self._data([self.WORK])
+        acct = {s["session_id"]: s["account"] for s in data["sessions_all"]}
+        self.assertEqual(acct["s-work"], "work")
+        self.assertEqual(acct["s-priv"], "private")
+
+    def test_prefix_matches_on_path_boundary_only(self):
+        """`/mgb-privat` must not be swallowed by the `/mgb` prefix."""
+        data = self._data([self.WORK])
+        acct = {s["session_id"]: s["account"] for s in data["sessions_all"]}
+        self.assertEqual(acct["s-sibling"], "private")
+
+    def test_daily_rows_carry_account(self):
+        data = self._data([self.WORK])
+        accounts = {r["account"] for r in data["daily_by_model"]}
+        self.assertEqual(accounts, {"work", "private"})
+
+    def test_work_tokens_are_isolated(self):
+        data = self._data([self.WORK])
+        work = [r for r in data["daily_by_model"] if r["account"] == "work"]
+        self.assertEqual(sum(r["input"] for r in work), 10)
+        self.assertEqual(sum(r["output"] for r in work), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,9 +6,9 @@ class ClaudeUsage < Formula
   # sha256 would be uncomputable (the tarball would contain this very hash).
   # It therefore tracks one release behind by design — bump to the prior tag
   # each release. See AGENTS.md "Homebrew formula and self-referential SHA".
-  url "https://github.com/phuryn/claude-usage/archive/refs/tags/v1.5.1.tar.gz"
-  version "1.5.1"
-  sha256 "88224cf583a04863942c5246e2e35d901bf60738dbe3352567ef6c749af9730d"
+  url "https://github.com/phuryn/claude-usage/archive/refs/tags/v1.5.5.tar.gz"
+  version "1.5.5"
+  sha256 "d56763c4742a0903cdf1e465a8b8e7e03ae6283c7d22a86e8729eee77a39c315"
   license "MIT"
   head "https://github.com/phuryn/claude-usage.git", branch: "main"
 
