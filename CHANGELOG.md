@@ -12,6 +12,10 @@
 - Fixed `sqlite3.IntegrityError: UNIQUE constraint failed: sessions.session_id` killing the dashboard on startup. `cli.cmd_dashboard` starts a background scan thread and then calls `serve()`, which ran its *own* blocking scan — two scanners raced on the non-atomic SELECT-then-INSERT in `upsert_sessions`, both saw "session missing", and the second INSERT took down both threads. `scan()` now serialises on a module-level lock, which also covers the `SCAN_INTERVAL` auto-scan loop and `POST /api/rescan` overlapping.
 - `serve()` takes `initial_scan=True`; `cli.cmd_dashboard` passes `False` to drop the duplicate scan. This also restores what its own comment intends: the port now binds in ~1s instead of after a full cold scan (the VS Code extension kills the process if `/api/data` doesn't answer in time).
 
+### Scanner / CLI
+
+- Fixed the **Python 3.9 CI leg** failing at import: `dashboard.py` annotated a return type with a PEP 604 union (`str | None`), which 3.9 evaluates at runtime and rejects with `TypeError: unsupported operand type(s) for |`. Three test modules couldn't import, so only 107 of 152 tests ran there. `from __future__ import annotations` makes annotations lazy, so the syntax is safe on every supported version.
+
 ### Packaging
 
 - The Docker image sets `PYTHONUNBUFFERED=1` so scan progress streams to `docker compose logs` instead of sitting in Python's block buffer — a long scan previously looked hung.
