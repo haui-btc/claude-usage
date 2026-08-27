@@ -1066,15 +1066,6 @@ function localISODate(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function rangeIncludesToday(range) {
-  if (range === 'all') return true;
-  const { start, end } = getRangeBounds(range);
-  const today = localISODate(new Date());
-  if (start && today < start) return false;
-  if (end && today > end) return false;
-  return true;
-}
-
 function getRangeBounds(range) {
   if (range === 'all') return { start: null, end: null };
   const today = new Date();
@@ -1117,7 +1108,6 @@ function setRange(range) {
   if (sel) sel.value = range;  // keep the dropdown in sync with programmatic calls
   updateURL();
   applyFilter();
-  scheduleAutoRefresh();
 }
 
 function initAccountFilter(workDirs) {
@@ -2245,8 +2235,7 @@ async function loadData() {
       if (rawData === null) setTimeout(loadData, 3000);
       return;
     }
-    const refreshNote = rangeIncludesToday(selectedRange) ? '<br>Auto-refresh in 30s' : '';
-    document.getElementById('meta').innerHTML = 'Updated: ' + esc(d.generated_at) + refreshNote;
+    document.getElementById('meta').innerHTML = 'Updated: ' + esc(d.generated_at);
 
     const isFirstLoad = rawData === null;
     rawData = d;
@@ -2276,14 +2265,6 @@ async function loadData() {
     renderGauges();
   } catch(e) {
     console.error(e);
-  }
-}
-
-let autoRefreshTimer = null;
-function scheduleAutoRefresh() {
-  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
-  if (rangeIncludesToday(selectedRange)) {
-    autoRefreshTimer = setInterval(loadData, 30000);
   }
 }
 
@@ -2502,7 +2483,6 @@ function initSectionNav() {
 initFooterMeta();
 initSectionNav();
 loadData();
-scheduleAutoRefresh();
 </script>
 
 </body>
